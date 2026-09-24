@@ -1,0 +1,27 @@
+# Data and large artefacts never go into git (dataset is ~2.4 GB and belongs to Amazon)
+dataset/
+data/
+*.tsv
+*.zip
+*.parquet
+*.npz
+*.pkl
+*.joblib
+*.txt.gz
+work/
+output/
+models/
+
+# Keep the pinned environment file
+!requirements.txt
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+__MACOSX/
+Thumbs.db
