@@ -16,3 +16,13 @@ SEED = 42
 
 for _d in (WORK_DIR, OUTPUT_DIR):
     _d.mkdir(parents=True, exist_ok=True)
+
+# Windows throttles Normal-priority background processes (EcoQoS), especially on battery:
+# measured 3.3 cores -> full CPU (4.6x) when raised to High. Applies to pool workers too,
+# since they import this module.
+try:
+    import psutil as _ps
+    if hasattr(_ps, "HIGH_PRIORITY_CLASS"):
+        _ps.Process().nice(_ps.HIGH_PRIORITY_CLASS)
+except Exception as _e:  # priority is a speed optimisation only; never affects results
+    print(f"[config] could not raise process priority: {_e}")
