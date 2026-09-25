@@ -39,6 +39,7 @@ Data location is configured by environment variables (defaults in `src/config.py
 python -m src.prep                                   # translit dictionary (train fold 0) + normalised parquet
 python -m src.candidates train blend_ad15            # full-index candidates for training (resumable)
 python -m experiments.exp_blocking2 blend_ad15 0.05  # 5 % full-index sample (US training pairs)
+# (in the submission zip these scripts live in src/experiments/: python -m src.experiments.exp_blocking2 ...)
 python -m src.candidates test blend_ad15             # full-index candidates for test (resumable)
 python -m src.train_final final_v1 0.66 100          # final LightGBM, threshold frozen in meta
 python -m src.pipeline predict final_v1              # -> output/matching_results.tsv + candidate_pairs.tsv

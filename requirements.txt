@@ -8,3 +8,4 @@ lightgbm==4.7.0           # MIT
 rapidfuzz==3.14.6         # MIT
 sparse-dot-topn==1.2.0    # Apache-2.0
 anyascii==0.3.3           # ISC
+psutil==7.2.2             # BSD-3 (memory instrumentation in blocking)

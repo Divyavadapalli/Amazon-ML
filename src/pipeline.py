@@ -63,35 +63,47 @@ def predict(model_tag: str, out_dir=OUTPUT_DIR, only_countries=None):
     q_pos = pd.Index(q_ids)
     freq = s1[["country", "name_core"]].value_counts().to_dict()
 
-    cs, cq, ms, mq = [], [], [], []
-    qcache, country_loaded, n_pairs, t0 = None, None, 0, time.time()
+    # Per-chunk scores are checkpointed (atomic write) so a crash resumes at the next chunk;
+    # the frozen threshold / assignment is applied once, below, to the stored probabilities.
+    ckpt = WORK_DIR / f"pred_{model_tag}"   # chunk scores depend only on (model, chunk): shared by smoke and final runs
+    ckpt.mkdir(exist_ok=True)
+    cs, cq, cp = [], [], []
+    qcache, country_loaded, t0 = None, None, time.time()
     files = sorted(d.glob("*.parquet"))
     if only_countries:
         files = [f for f in files if f.stem.rsplit("_", 1)[0] in only_countries or f.stem in only_countries]
     for p in files:
         t = time.time()
-        c = pd.read_parquet(p).sort_values(["q_id", "rank"], kind="stable").reset_index(drop=True)
-        country = p.stem.rsplit("_", 1)[0]
-        if country != country_loaded:          # load only this country's query records
-            qcache = pd.concat([ds.dataset(str(WORK_DIR / f"test_s{k}.parquet")).to_table(
-                columns=REC, filter=ds.field("country") == country).to_pandas() for k in (2, 3)]
-            ).set_index("entity_id")
-            country_loaded = country
-        X = pair_features(c, s1i, qcache, freq)[feats]
-        prob = model.predict(X, num_threads=12)
-        si = s1_pos.get_indexer(c["s1_id"])
-        qi = q_pos.get_indexer(c["q_id"])
-        assert (si >= 0).all() and (qi >= 0).all(), f"unknown ids in {p.name}"
-        cs.append(si.astype(np.int32)); cq.append(qi.astype(np.int32))
-        sel = pd.DataFrame({"qi": qi, "si": si, "prob": prob})
-        if one_to_one:
-            sel = sel.sort_values("prob", ascending=False, kind="stable").drop_duplicates("qi")
-        sel = sel[sel["prob"] >= thr]
-        ms.append(sel["si"].to_numpy(np.int32)); mq.append(sel["qi"].to_numpy(np.int32))
-        n_pairs += len(c)
-        print(f"  {p.name}: {len(c)} pairs, {len(sel)} matches, {time.time() - t:.0f}s", flush=True)
+        cf = ckpt / f"{p.stem}.npz"
+        if cf.exists():
+            z = np.load(cf)
+            si, qi, prob = z["si"], z["qi"], z["prob"]
+            print(f"  {p.name}: {len(si)} pairs (checkpoint)", flush=True)
+        else:
+            c = pd.read_parquet(p).sort_values(["q_id", "rank"], kind="stable").reset_index(drop=True)
+            country = p.stem.rsplit("_", 1)[0]
+            if country != country_loaded:          # load only this country's query records
+                qcache = pd.concat([ds.dataset(str(WORK_DIR / f"test_s{k}.parquet")).to_table(
+                    columns=REC, filter=ds.field("country") == country).to_pandas() for k in (2, 3)]
+                ).set_index("entity_id")
+                country_loaded = country
+            X = pair_features(c, s1i, qcache, freq)[feats]
+            prob = model.predict(X, num_threads=12).astype(np.float32)
+            si = s1_pos.get_indexer(c["s1_id"]).astype(np.int32)
+            qi = q_pos.get_indexer(c["q_id"]).astype(np.int32)
+            assert (si >= 0).all() and (qi >= 0).all(), f"unknown ids in {p.name}"
+            tmp = ckpt / f"{p.stem}.tmp.npz"
+            np.savez(tmp, si=si, qi=qi, prob=prob)
+            tmp.replace(cf)
+            print(f"  {p.name}: {len(si)} pairs scored in {time.time() - t:.0f}s", flush=True)
+        cs.append(si); cq.append(qi); cp.append(prob)
 
-    cs, cq, ms, mq = (np.concatenate(x) for x in (cs, cq, ms, mq))
+    cs, cq, cp = (np.concatenate(x) for x in (cs, cq, cp))
+    sel = pd.DataFrame({"qi": cq, "si": cs, "prob": cp})
+    if one_to_one:
+        sel = sel.sort_values("prob", ascending=False, kind="stable").drop_duplicates("qi")
+    sel = sel[sel["prob"] >= thr]
+    ms, mq = sel["si"].to_numpy(np.int32), sel["qi"].to_numpy(np.int32)
     # ---- hard checks before writing anything
     ckey = cs.astype(np.int64) * len(q_ids) + cq
     mkey = ms.astype(np.int64) * len(q_ids) + mq

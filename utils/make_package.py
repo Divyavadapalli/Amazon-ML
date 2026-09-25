@@ -23,6 +23,11 @@ if __name__ == "__main__":
         base = "code/business_entity_resolution"
         for p in sorted((REPO / "src").rglob("*.py")):
             z.write(p, f"{base}/src/{p.relative_to(REPO / 'src').as_posix()}")
+        # experiment/validation scripts (incl. exp_blocking2, which produces the US training
+        # sample used by src.train_final) ship under src/experiments/
+        for p in sorted((REPO / "experiments").glob("*.py")):
+            z.write(p, f"{base}/src/experiments/{p.name}")
+        z.write(REPO / "utils" / "validate_submission.py", f"{base}/src/utils/validate_submission.py")
         z.write(REPO / "README.md", f"{base}/README.md")
         z.write(REPO / "requirements.txt", f"{base}/requirements.txt")
         z.write(REPO / "Documentation_template.md", "Documentation_template.md")
