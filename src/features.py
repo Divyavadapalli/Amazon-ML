@@ -75,6 +75,13 @@ def pair_features(pairs: pd.DataFrame, s1: pd.DataFrame, q: pd.DataFrame,
     second = pairs["q_id"].map(second).fillna(0.0).to_numpy()
     F["ret_margin"] = np.where(F["ret_rank"] == 0, F["ret_score"] - second, 0.0)
     F["ret_ncand"] = grp.transform("size").values
+    # per-pass evidence from multi-pass blocking (score, rank; -1/NaN when the pass
+    # did not produce the pair) and the exact-name flag
+    for col in pairs.columns:
+        if col.startswith(("sc_", "rk_")) or col == "ex":
+            F[f"blk_{col}"] = pairs[col].to_numpy()
+    # NB: no per-S1 counts over queries (e.g. "how many queries rank this S1 first"):
+    # validation uses a query sample, so such counts would shift between val and test.
 
     nc1, nc2 = a["name_core"].tolist(), b["name_core"].tolist()
     nn1, nn2 = a["name_norm"].tolist(), b["name_norm"].tolist()

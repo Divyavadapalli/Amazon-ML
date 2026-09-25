@@ -47,26 +47,81 @@ def _text(df, view):
     return (name + " " + alt).str.strip()
 
 
-def build_views(s1: pd.DataFrame, q: pd.DataFrame, views, max_df: dict):
-    """{view: (S1 matrix, query matrix)}, each row L2-normalised TF-IDF."""
-    out = {}
-    for v in views:
-        kw = dict(dtype=np.float32, sublinear_tf=True, max_df=max_df[v], min_df=1, lowercase=False)
-        if v == "nc":
-            vec = TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 3), **kw)
-        elif v == "ab":
-            vec = TfidfVectorizer(token_pattern=r"[^ ]+", ngram_range=(2, 2), **kw)
-        else:
-            vec = TfidfVectorizer(token_pattern=r"[^ ]+", **kw)
-        m1 = vec.fit_transform(_text(s1, v))
-        out[v] = (m1, vec.transform(_text(q, v)))
-    return out
+class CountryIndex:
+    """TF-IDF views and per-pass S1 matrices for one country, built once and then
+    queried in chunks (vectorisers are fitted on S1 only)."""
+
+    def __init__(self, s1: pd.DataFrame, cfg: dict):
+        self.cfg = {**DEFAULT, **(cfg or {})}
+        self.s1 = s1
+        t = time.time()
+        views = sorted({v for p in self.cfg["passes"] for v, w in p["w"].items() if w > 0})
+        self.vecs, self.m1 = {}, {}
+        for v in views:
+            kw = dict(dtype=np.float32, sublinear_tf=True, max_df=self.cfg["max_df"][v],
+                      min_df=1, lowercase=False)
+            if v == "nc":
+                vec = TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 3), **kw)
+            elif v == "ab":
+                vec = TfidfVectorizer(token_pattern=r"[^ ]+", ngram_range=(2, 2), **kw)
+            else:
+                vec = TfidfVectorizer(token_pattern=r"[^ ]+", **kw)
+            self.m1[v] = vec.fit_transform(_text(s1, v))
+            self.vecs[v] = vec
+        self.BT = {p["name"]: _blend(self.m1, p["w"]).T.tocsr() for p in self.cfg["passes"]}
+        self.p0 = self.cfg["passes"][0]
+        self.B0 = _blend(self.m1, self.p0["w"])
+        if self.cfg["exact"]:
+            a = pd.DataFrame({"key": s1["name_core"].values,
+                              "s1_idx": np.arange(len(s1), dtype=np.int32)})
+            a = a[a["key"] != ""]
+            self.exact_tab = a[a.groupby("key")["s1_idx"].transform("size") <= self.cfg["exact_cap"]]
+        print(f"    index: {len(s1)} S1, views={views} built in {time.time() - t:.0f}s {_mem()}",
+              flush=True)
+
+    def query(self, q: pd.DataFrame) -> pd.DataFrame:
+        """Candidates for a chunk of queries: q_idx (positional in q), s1_idx, per-pass
+        sc_*/rk_* columns, optional exact flag `ex`, blended `score` and final `rank`."""
+        t = time.time()
+        mq = {v: vec.transform(_text(q, v)) for v, vec in self.vecs.items()}
+        merged = None
+        for p in self.cfg["passes"]:
+            A = _blend(mq, p["w"])
+            r = _topk(A, self.BT[p["name"]], p["k"], self.cfg["min_score"])
+            r = r.rename(columns={"score": f"sc_{p['name']}", "rank": f"rk_{p['name']}"})
+            merged = r if merged is None else merged.merge(r, on=["q_idx", "s1_idx"], how="outer")
+        if self.cfg["exact"]:
+            b = pd.DataFrame({"key": q["name_core"].values, "q_idx": np.arange(len(q), dtype=np.int32)})
+            e = b.merge(self.exact_tab, on="key")[["q_idx", "s1_idx"]].assign(ex=np.int8(1))
+            merged = merged.merge(e, on=["q_idx", "s1_idx"], how="outer")
+            merged["ex"] = merged["ex"].fillna(0).astype(np.int8)
+        for c in merged.columns:
+            if c.startswith("rk_"):
+                merged[c] = merged[c].fillna(-1).astype(np.int16)
+        # the blended cosine of the first pass for EVERY pair (pairs found only by other
+        # passes or by the exact join get it computed directly)
+        sc0 = f"sc_{self.p0['name']}"
+        miss = merged[sc0].isna().to_numpy()
+        if miss.any():
+            A0 = _blend(mq, self.p0["w"])
+            qi, si = merged["q_idx"].to_numpy()[miss], merged["s1_idx"].to_numpy()[miss]
+            merged.loc[miss, sc0] = np.asarray(A0[qi].multiply(self.B0[si]).sum(axis=1)).ravel().astype(np.float32)
+        for c in merged.columns:
+            if c.startswith("sc_"):
+                merged[c] = merged[c].fillna(0).astype(np.float32)
+        merged["score"] = merged[sc0]
+        merged = merged.sort_values(["q_idx", "score"], ascending=[True, False], kind="stable")
+        merged["rank"] = merged.groupby("q_idx").cumcount().astype(np.int16)
+        print(f"    query: {len(q)} q -> {len(merged)} pairs in {time.time() - t:.0f}s {_mem()}",
+              flush=True)
+        return merged.reset_index(drop=True)
 
 
-def _blend(mats, weights, side):
+def _blend(mats, weights):
+    """Weighted hstack of L2-normalised views; cosine of blends = weighted mean of view cosines."""
     ws = {v: w for v, w in weights.items() if w > 0}
     norm = np.sqrt(sum(w * w for w in ws.values()))
-    return sp.hstack([mats[v][side] * (w / norm) for v, w in ws.items()], format="csr")
+    return sp.hstack([mats[v] * (w / norm) for v, w in ws.items()], format="csr")
 
 
 def _topk(A, BT, k, min_score):
@@ -78,56 +133,9 @@ def _topk(A, BT, k, min_score):
     return out
 
 
-def _exact(s1, q, cap):
-    """Queries whose name_core equals an S1 name_core (skip names shared by > cap S1)."""
-    a = pd.DataFrame({"key": s1["name_core"].values, "s1_idx": np.arange(len(s1), dtype=np.int32)})
-    a = a[a["key"] != ""]
-    sizes = a.groupby("key")["s1_idx"].transform("size")
-    a = a[sizes <= cap]
-    b = pd.DataFrame({"key": q["name_core"].values, "q_idx": np.arange(len(q), dtype=np.int32)})
-    return b.merge(a, on="key")[["q_idx", "s1_idx"]]
-
-
 def retrieve(s1: pd.DataFrame, q: pd.DataFrame, cfg: dict = None) -> pd.DataFrame:
-    """Candidates for one country: q_idx, s1_idx, plus score/rank per pass
-    (NaN/-1 when the pair was not produced by that pass) and `score`=max pass score."""
-    cfg = {**DEFAULT, **(cfg or {})}
-    t = time.time()
-    views = sorted({v for p in cfg["passes"] for v, w in p["w"].items() if w > 0})
-    mats = build_views(s1, q, views, cfg["max_df"])
-    t_vec = time.time() - t
-    merged = None
-    for p in cfg["passes"]:
-        tp = time.time()
-        A = _blend(mats, p["w"], 1)
-        BT = _blend(mats, p["w"], 0).T.tocsr()
-        r = _topk(A, BT, p["k"], cfg["min_score"])
-        r = r.rename(columns={"score": f"sc_{p['name']}", "rank": f"rk_{p['name']}"})
-        print(f"      pass {p['name']}: {len(r)} pairs {time.time() - tp:.0f}s nnzA={A.nnz} "
-              f"nnzB={BT.nnz} {_mem()}", flush=True)
-        merged = r if merged is None else merged.merge(r, on=["q_idx", "s1_idx"], how="outer")
-        del A, BT
-    if cfg["exact"]:
-        e = _exact(s1, q, cfg["exact_cap"]).assign(ex=np.int8(1))
-        merged = merged.merge(e, on=["q_idx", "s1_idx"], how="outer")
-        merged["ex"] = merged["ex"].fillna(0).astype(np.int8)
-    sc_cols = [c for c in merged.columns if c.startswith("sc_")]
-    for c in merged.columns:
-        if c.startswith("rk_"):
-            merged[c] = merged[c].fillna(-1).astype(np.int16)
-    merged["score"] = merged[sc_cols].max(axis=1).fillna(0).astype(np.float32)
-    # exact-only pairs lack pass scores; give them the true blended cosine of pass 0
-    missing = merged[sc_cols[0]].isna().to_numpy()
-    if missing.any():
-        p0 = cfg["passes"][0]["w"]
-        A, B = _blend(mats, p0, 1), _blend(mats, p0, 0)
-        qi, si = merged["q_idx"].to_numpy()[missing], merged["s1_idx"].to_numpy()[missing]
-        merged.loc[missing, "score"] = np.asarray(A[qi].multiply(B[si]).sum(axis=1)).ravel()
-    merged = merged.sort_values(["q_idx", "score"], ascending=[True, False], kind="stable")
-    merged["rank"] = merged.groupby("q_idx").cumcount().astype(np.int16)
-    print(f"    retrieve: {len(q)} q x {len(s1)} S1 vec={t_vec:.0f}s total={time.time() - t:.0f}s "
-          f"pairs={len(merged)} {_mem()}", flush=True)
-    return merged.reset_index(drop=True)
+    """One-shot convenience wrapper: build the index for `s1` and query all of `q`."""
+    return CountryIndex(s1, cfg).query(q)
 
 
 def retrieve_all(s1_all: pd.DataFrame, q_all: pd.DataFrame, cfg: dict = None) -> pd.DataFrame:

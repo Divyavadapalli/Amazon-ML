@@ -37,6 +37,18 @@ CONFIGS = {
     "multi_ab": {"passes": [{"name": "blend", "w": {"nw": 1.0, "nc": 1.0, "ad": 0.6, "ab": 0.6}, "k": 10},
                             {"name": "addr", "w": {"ad": 0.6, "ab": 1.0}, "k": 5}],
                  "exact": True},
+    # address-dominant evidence: ~60 % of blend10 misses have a perfect address match but
+    # lose top-10 slots to S1 namesakes (India names are heavily duplicated)
+    "blend_ad20_k15": {"passes": [{"name": "blend", "w": {"nw": 1.0, "nc": 1.0, "ad": 2.0}, "k": 15}]},
+    "blend_ad15": {"passes": [{"name": "blend", "w": {"nw": 1.0, "nc": 1.0, "ad": 1.5}, "k": 10}]},
+    "blend_addrpass": {"passes": [{"name": "blend", "w": B, "k": 10},
+                                  {"name": "addr", "w": {"ad": 1.0, "nc": 0.5}, "k": 5}],
+                       "exact": True},
+    # speed variants: lower max_df (drop more common features); recall impact measured
+    "blend_ab10_df005": {"passes": [{"name": "blend", "w": {"nw": 1.0, "nc": 1.0, "ad": 0.6, "ab": 0.6}, "k": 10}],
+                         "max_df": {"nw": 0.005, "nc": 0.005, "ad": 0.005, "ab": 0.005}},
+    "blend10_df005": {"passes": [{"name": "blend", "w": B, "k": 10}],
+                      "max_df": {"nw": 0.005, "nc": 0.005, "ad": 0.005}},
     "blend10_df": {"passes": [{"name": "blend", "w": B, "k": 10}],
                    "max_df": {"nw": 0.05, "nc": 0.03, "ad": 0.05}},
 }
