@@ -39,12 +39,15 @@ def _write(path, header_col, s1_ids, s_idx, q_idx, q_ids):
             f.write(s + "\t" + ",".join(q_ids[q_sorted[a:b]]) + "\n")
 
 
-def predict(model_tag: str, out_dir=OUTPUT_DIR, only_countries=None):
+def predict(model_tag: str, out_dir=OUTPUT_DIR, only_countries=None, top_k: int = 10,
+            threshold: float = None):
     """only_countries: smoke-test mode on a subset of complete country chunks, written to a
     scratch directory (never to OUTPUT_DIR)."""
     meta = json.loads((WORK_DIR / f"m2_model_{model_tag}.meta.json").read_text())
     model = lgb.Booster(model_file=str(WORK_DIR / f"m2_model_{model_tag}.txt"))
     feats, thr, one_to_one = meta["features"], meta["threshold"], meta["one_to_one"]
+    if threshold is not None:   # e.g. re-tuned for top_k on the validation tune half
+        thr = threshold
     assert model.feature_name() == feats, "model/meta feature mismatch"
     d = WORK_DIR / f"cand_test_{meta['cand_tag']}"
     if only_countries:
@@ -65,7 +68,11 @@ def predict(model_tag: str, out_dir=OUTPUT_DIR, only_countries=None):
 
     # Per-chunk scores are checkpointed (atomic write) so a crash resumes at the next chunk;
     # the frozen threshold / assignment is applied once, below, to the stored probabilities.
-    ckpt = WORK_DIR / f"pred_{model_tag}"   # chunk scores depend only on (model, chunk): shared by smoke and final runs
+    # top_k: the model scores only each query's top_k retrieval candidates (smaller final
+    # candidate set). Per-query retrieval features are computed from ALL retrieved candidates
+    # first, so the kept pairs get exactly the features the model was validated on.
+    ckpt = WORK_DIR / f"pred_{model_tag}_k{top_k}"
+    full_ckpt = WORK_DIR / f"pred_{model_tag}"             # earlier top-10 scores, reusable by masking
     ckpt.mkdir(exist_ok=True)
     cs, cq, cp = [], [], []
     qcache, country_loaded, t0 = None, None, time.time()
@@ -79,6 +86,14 @@ def predict(model_tag: str, out_dir=OUTPUT_DIR, only_countries=None):
             z = np.load(cf)
             si, qi, prob = z["si"], z["qi"], z["prob"]
             print(f"  {p.name}: {len(si)} pairs (checkpoint)", flush=True)
+        elif (full_ckpt / f"{p.stem}.npz").exists():
+            # scores from a full top-10 run: same features per pair, keep rank < top_k rows
+            c = pd.read_parquet(p, columns=["q_id", "rank"]).sort_values(["q_id", "rank"], kind="stable")
+            z = np.load(full_ckpt / f"{p.stem}.npz")
+            assert len(z["si"]) == len(c), f"checkpoint/candidate length mismatch in {p.name}"
+            keep = c["rank"].to_numpy() < top_k
+            si, qi, prob = z["si"][keep], z["qi"][keep], z["prob"][keep]
+            print(f"  {p.name}: {len(si)} pairs (top-10 checkpoint, masked to top {top_k})", flush=True)
         else:
             c = pd.read_parquet(p).sort_values(["q_id", "rank"], kind="stable").reset_index(drop=True)
             country = p.stem.rsplit("_", 1)[0]
@@ -87,7 +102,12 @@ def predict(model_tag: str, out_dir=OUTPUT_DIR, only_countries=None):
                     columns=REC, filter=ds.field("country") == country).to_pandas() for k in (2, 3)]
                 ).set_index("entity_id")
                 country_loaded = country
-            X = pair_features(c, s1i, qcache, freq)[feats]
+            n_full = c.groupby("q_id")["q_id"].transform("size").to_numpy()
+            keep = c["rank"].to_numpy() < top_k
+            c, n_full = c[keep].reset_index(drop=True), n_full[keep]
+            X = pair_features(c, s1i, qcache, freq)
+            X["ret_ncand"] = n_full.astype(np.float32)     # candidates retrieved, as in training
+            X = X[feats]
             prob = model.predict(X, num_threads=12).astype(np.float32)
             si = s1_pos.get_indexer(c["s1_id"]).astype(np.int32)
             qi = q_pos.get_indexer(c["q_id"]).astype(np.int32)
@@ -116,7 +136,7 @@ def predict(model_tag: str, out_dir=OUTPUT_DIR, only_countries=None):
     out_dir.mkdir(parents=True, exist_ok=True)
     _write(out_dir / "matching_results.tsv", "matched_entity_ids", s1_ids, ms, mq, q_ids)
     _write(out_dir / "candidate_pairs.tsv", "candidate_entity_ids", s1_ids, cs, cq, q_ids)
-    stats = {"model_tag": model_tag, "threshold": thr, "one_to_one": one_to_one,
+    stats = {"model_tag": model_tag, "threshold": thr, "one_to_one": one_to_one, "top_k": top_k,
              "n_s1": len(s1_ids), "n_candidate_pairs": int(len(cs)), "n_matches": int(len(ms)),
              "s1_with_match": int(len(np.unique(ms))), "share_s1_with_match": len(np.unique(ms)) / len(s1_ids),
              "matches_per_matched_s1": len(ms) / max(len(np.unique(ms)), 1),
@@ -128,7 +148,8 @@ def predict(model_tag: str, out_dir=OUTPUT_DIR, only_countries=None):
 
 
 if __name__ == "__main__":
-    if sys.argv[1] == "predict":
-        predict(sys.argv[2])
+    if sys.argv[1] == "predict":            # python -m src.pipeline predict <model_tag> [top_k]
+        predict(sys.argv[2], top_k=int(sys.argv[3]) if len(sys.argv) > 3 else 10,
+                threshold=float(sys.argv[4]) if len(sys.argv) > 4 else None)
     elif sys.argv[1] == "smoke":            # python -m src.pipeline smoke <model_tag> <country,...>
         predict(sys.argv[2], WORK_DIR / "smoke_output", sys.argv[3].split(","))
