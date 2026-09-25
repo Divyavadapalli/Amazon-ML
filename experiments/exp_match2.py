@@ -28,7 +28,7 @@ import psutil
 from src import candidates
 from src.config import WORK_DIR
 from src.features import pair_features
-from src.io_utils import read_ground_truth
+from src.io_utils import read_ground_truth, read_records
 from src.matching import train_model
 from src.metrics import macro_f05
 
@@ -116,8 +116,8 @@ if __name__ == "__main__":
 
     s1 = pd.read_parquet(WORK_DIR / "train_s1.parquet", columns=REC).set_index("entity_id")
     need = set(ev_pairs.q_id) | set(tr_pairs.q_id)
-    q = pd.concat([pd.read_parquet(WORK_DIR / f"train_s{k}.parquet", columns=REC) for k in (2, 3)])
-    q = q[q.entity_id.isin(need)].set_index("entity_id")
+    q = pd.concat([read_records(WORK_DIR / f"train_s{k}.parquet", need, REC) for k in (2, 3)])
+    q = q.set_index("entity_id")
     freq = s1_name_freq()
     t = time.time()
     tr_pairs, Xtr = featurize(tr_pairs, s1, q, freq)

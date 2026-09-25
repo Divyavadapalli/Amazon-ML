@@ -44,8 +44,10 @@ def predict(model_tag: str, cand_tag: str, threshold: float, one_to_one: bool = 
         country = p.stem.rsplit("_", 1)[0]
         if country not in qcache:          # load only this country's query records
             qcache.clear()
-            q = pd.concat([pd.read_parquet(WORK_DIR / f"test_s{k}.parquet", columns=REC) for k in (2, 3)])
-            qcache[country] = q[q["country"] == country].set_index("entity_id")
+            import pyarrow.dataset as ds
+            parts = [ds.dataset(str(WORK_DIR / f"test_s{k}.parquet")).to_table(
+                columns=REC, filter=ds.field("country") == country).to_pandas() for k in (2, 3)]
+            qcache[country] = pd.concat(parts).set_index("entity_id")
         X = pair_features(c, s1i, qcache[country], freq)[feats]
         prob = model.predict(X, num_threads=12)
         for s, qq in zip(c["s1_id"].to_numpy(), c["q_id"].to_numpy()):

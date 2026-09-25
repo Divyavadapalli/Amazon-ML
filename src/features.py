@@ -19,6 +19,18 @@ REC_COLS = ["name_norm", "name_core", "name_alt", "addr_norm", "addr_digits", "p
             "business_name", "business_address"]
 
 
+_POOL = None
+
+
+def _pool():
+    """One worker pool for the whole process (Windows 'spawn' makes each new pool re-import
+    numpy/pandas in every worker, so creating one per chunk is expensive)."""
+    global _POOL
+    if _POOL is None:
+        _POOL = Pool(N_JOBS)
+    return _POOL
+
+
 def _cp(a, b, scorer):
     return cpdist(a, b, scorer=scorer, workers=-1, dtype=np.float32)
 
@@ -123,8 +135,7 @@ def pair_features(pairs: pd.DataFrame, s1: pd.DataFrame, q: pd.DataFrame,
     step = max(n // (N_JOBS * 4), 20000)
     chunks = [(nn1[i:i + step], nn2[i:i + step], an1[i:i + step], an2[i:i + step],
                d1[i:i + step], d2[i:i + step]) for i in range(0, n, step)]
-    with Pool(N_JOBS) as pool:
-        S = np.vstack(pool.map(_set_feats, chunks)) if chunks else np.zeros((0, 12))
+    S = np.vstack(_pool().map(_set_feats, chunks)) if chunks else np.zeros((0, 12))
     for j, name in enumerate(SET_NAMES):
         F[name] = S[:, j]
 

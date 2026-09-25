@@ -42,3 +42,12 @@ def write_id_lists(path: Path, header_col: str, s1_ids: Iterable[str],
         for s1 in s1_ids:
             ids = list(dict.fromkeys(lists.get(s1, ())))  # de-duplicate, keep order
             f.write(f"{s1}\t{','.join(ids)}\n")
+
+
+def read_records(path, ids, columns):
+    """Read only the rows whose entity_id is in `ids` (pyarrow filters rows while scanning,
+    so the full 5M-row source is never materialised with all text columns)."""
+    import pyarrow.dataset as ds
+    tab = ds.dataset(str(path), format="parquet").to_table(
+        columns=columns, filter=ds.field("entity_id").isin(list(ids)))
+    return tab.to_pandas()
