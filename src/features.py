@@ -3,6 +3,7 @@
 Country is deliberately NOT a feature: France is absent from training, so every feature
 is a language-agnostic similarity or a structural property of the strings.
 """
+import re
 from multiprocessing import Pool
 
 import numpy as np
@@ -63,6 +64,55 @@ def _set_feats(args):
         p2 = {x for x in s2d if x.isdigit() and len(x) in (5, 6)}
         out[i, 11] = (1.0 if p1 & p2 else 0.0) if (p1 and p2) else -1
     return out
+
+
+_RE_NUM = re.compile(r"\d+")
+
+
+def _nums(addr: str):
+    """Digit runs of an address with leading zeros stripped ('N-0032' -> {'32'})."""
+    return {x.lstrip("0") or "0" for x in _RE_NUM.findall(addr)}
+
+
+def _num_legal_feats(args):
+    """Number-agreement and legal-form features (error analysis v1: false merges are
+    near-duplicates whose address differs in ONE house/unit number and whose legal form
+    differs; true matches keep S1's numbers, possibly zero-padded or with extra numbers)."""
+    a1, a2, n1, n2 = args
+    out = np.zeros((len(a1), 7), dtype=np.float32)
+    for i in range(len(a1)):
+        x, y = _nums(a1[i]), _nums(a2[i])
+        if x and y:
+            miss = x - y
+            out[i, 0] = len(miss)                                   # S1 numbers absent in query
+            out[i, 1] = len(y - x)                                  # extra numbers in query
+            out[i, 2] = float(not miss)                             # all S1 numbers present
+            shared = x & y
+            out[i, 3] = max((len(v) for v in shared), default=0)    # longest shared number
+            out[i, 4] = len(shared) / len(x)
+        else:
+            out[i, :5] = -1
+        l1 = set(n1[i].split()) & LEGAL_VALS
+        l2 = set(n2[i].split()) & LEGAL_VALS
+        out[i, 5] = float(("pvt" in l1) != ("pvt" in l2)) if (l1 and l2) else -1
+        out[i, 6] = len(l1 ^ l2)
+    return out
+
+
+NUM_LEGAL_NAMES = ["num_s1_missing", "num_q_extra", "num_s1_all_in_q", "num_longest_shared",
+                   "num_s1_share", "legal_pvt_mismatch", "legal_symdiff"]
+
+
+def num_legal_features(pairs, s1, q):
+    a = s1.loc[pairs["s1_id"].values, ["addr_norm", "name_norm"]]
+    b = q.loc[pairs["q_id"].values, ["addr_norm", "name_norm"]]
+    a1, a2 = a["addr_norm"].tolist(), b["addr_norm"].tolist()
+    n1, n2 = a["name_norm"].tolist(), b["name_norm"].tolist()
+    n = len(pairs)
+    step = max(n // (N_JOBS * 4), 20000)
+    chunks = [(a1[i:i + step], a2[i:i + step], n1[i:i + step], n2[i:i + step]) for i in range(0, n, step)]
+    S = np.vstack(_pool().map(_num_legal_feats, chunks)) if chunks else np.zeros((0, 7), np.float32)
+    return pd.DataFrame(S, columns=NUM_LEGAL_NAMES)
 
 
 SET_NAMES = ["core_jacc", "core_overlap", "s1_missing", "q_extra", "legal_agree",
@@ -143,4 +193,5 @@ def pair_features(pairs: pd.DataFrame, s1: pd.DataFrame, q: pd.DataFrame,
         keys = list(zip(a["country"], a["name_core"]))
         F["s1_name_freq"] = np.array([name_freq.get(k, 1) for k in keys], dtype=np.float32)
     F["q_is_s3"] = pairs["q_id"].str.startswith("S3-").astype(np.int8).values
-    return F
+    F = pd.concat([F, num_legal_features(pairs, s1, q).set_index(F.index)], axis=1)
+    return F.astype(np.float32)
