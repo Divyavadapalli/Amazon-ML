@@ -82,6 +82,8 @@ Findings from EDA on the training data:
   - Frequency of the S1 name in its country; source (S2/S3).
   - Country is not a feature, so France (unseen in training) is handled like any other country.
 
+**Language-invariant address signals.** French addresses reorder and rename street syntax ("12 Rue de la Paix" vs "Paix Street 12"), so token- and character-similarity on address text degrades under the unseen-French shift. The number features sidestep this: `_nums()` extracts zero-stripped digit runs and `postal_eq` compares 5–6-digit postal codes, both independent of surrounding words or language. Because these are structural rather than lexical, they carry the same discriminative power on French records as on the training distribution — which is why country is deliberately excluded as a feature. The conflict signals (`num_conflict`, `legal_conflict`) then catch the dominant false-merge mode — matching names with clashing house numbers — that pure name similarity cannot. A gradient-boosted tree learns these interactions directly, which is why it lifts macro F0.5 from 0.722 (retrieval-score rule) to 0.9651.
+
 **Model type:** LightGBM (MIT licence), binary objective, 127 leaves, learning rate 0.08, early stopping (935 trees). Trained on 7.24M labelled pairs from training data only.
 
 **Threshold selection method:**
