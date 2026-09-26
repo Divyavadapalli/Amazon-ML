@@ -1,6 +1,7 @@
 # Data and large artefacts never go into git (dataset is ~2.4 GB and belongs to Amazon)
 dataset/
 data/
+student_resource-*/
 *.tsv
 *.zip
 *.parquet
