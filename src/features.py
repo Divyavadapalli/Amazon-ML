@@ -193,5 +193,11 @@ def pair_features(pairs: pd.DataFrame, s1: pd.DataFrame, q: pd.DataFrame,
         keys = list(zip(a["country"], a["name_core"]))
         F["s1_name_freq"] = np.array([name_freq.get(k, 1) for k in keys], dtype=np.float32)
     F["q_is_s3"] = pairs["q_id"].str.startswith("S3-").astype(np.int8).values
+    # Extra hand-crafted column: a fixed linear blend of name (token-sort, scaled to [0,1])
+    # and digit-set Jaccard (missing -> 0). A retrained model can use it; the frozen model
+    # ignores unknown columns because pipeline/train_final select X[meta["features"]].
+    bk_name = F["nc_tsort"].to_numpy() / 100.0
+    bk_digit = np.where(F["num_jacc"].to_numpy() < 0, 0.0, F["num_jacc"].to_numpy())
+    F["bio_kinetic_score"] = (4.5 * bk_name + 3.5 * bk_digit - 5.0).astype(np.float32)
     F = pd.concat([F, num_legal_features(pairs, s1, q).set_index(F.index)], axis=1)
     return F.astype(np.float32)
