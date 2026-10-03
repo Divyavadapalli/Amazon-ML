@@ -41,6 +41,8 @@ CONFIGS = {
     # lose top-10 slots to S1 namesakes (India names are heavily duplicated)
     "blend_ad20_k15": {"passes": [{"name": "blend", "w": {"nw": 1.0, "nc": 1.0, "ad": 2.0}, "k": 15}]},
     "blend_ad15": {"passes": [{"name": "blend", "w": {"nw": 1.0, "nc": 1.0, "ad": 1.5}, "k": 10}]},
+    # ceiling study: same weights, K=50 (recall@20/@50 and where the missing true pairs rank)
+    "blend_ad15_k50": {"passes": [{"name": "blend", "w": {"nw": 1.0, "nc": 1.0, "ad": 1.5}, "k": 50}]},
     "blend_addrpass": {"passes": [{"name": "blend", "w": B, "k": 10},
                                   {"name": "addr", "w": {"ad": 1.0, "nc": 0.5}, "k": 5}],
                        "exact": True},
@@ -90,7 +92,7 @@ def evaluate(c, q, truth, s1):
     for col in ("country", "source", "addr_empty", "script", "core_exact"):
         out[f"recall_by_{col}"] = tp.groupby(col)["hit"].agg(["mean", "size"]).round(4).to_dict("index")
     rk = c.merge(tp[["q_id", "owner"]], left_on=["q_id", "s1_id"], right_on=["q_id", "owner"])["rank"]
-    out["recall@k"] = {k: float((rk < k).sum() / len(tp)) for k in (1, 2, 3, 5, 10, 20)}
+    out["recall@k"] = {k: float((rk < k).sum() / len(tp)) for k in (1, 2, 3, 5, 10, 20, 30, 50)}
     # oracle macro-F0.5 (perfect matcher on these candidates) over sampled entities
     hit_by_s1 = tp[tp["hit"]].groupby("owner").size()
     f = []
